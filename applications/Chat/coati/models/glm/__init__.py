@@ -1,3 +1,3 @@
-from .glm_rm import GLMRM
+from .glm_rm import ChatGLMRM
 
-__all__ = ['GLMRM']
+__all__ = ['ChatGLMRM']
