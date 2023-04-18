@@ -163,6 +163,17 @@ class EasyRewardDataset(Dataset):
 
     def __str__(self):
         return f"LawRewardDataset(chosen_len={len(self.chosen)}, reject_len={len(self.reject)})"
+    
+    @staticmethod
+    def collate_fn(batch):
+        size = len(batch)
+        chosen_input_ids = [d['chosen_input_ids'] for d in batch]
+        chosen_attention_mask = [d['chosen_attention_mask'] for d in batch]
+        reject_input_ids = [d['reject_input_ids'] for d in batch]
+        reject_attention_mask = [d['reject_attention_mask'] for d in batch]
+
+        return (torch.tensor(chosen_input_ids,dtype=torch.long), 
+                torch.tensor(chosen_attention_mask), torch.tensor(reject_input_ids,dtype=torch.long), torch.tensor(reject_attention_mask))
 
 
 '''
