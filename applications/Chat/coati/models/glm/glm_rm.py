@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.nn import Module 
 from transformers import AutoModel
 from peft import PeftModel,LoraConfig,TaskType,get_peft_model
+from peft.tuners.lora import LoraLayer
+from coati.models.utils import masked_mean
 import os
 from typing import Optional
 
@@ -21,8 +23,10 @@ class ChatGLMRM(Module):
     def __init__(self,
                  pretrained: str = None,
                  lora_path :str = None,
-                 lora_rank :int = 0) -> None:
+                 lora_rank :int = 0,
+                 pad_id :int = 3) -> None:
         super().__init__()
+        self.pad_id = pad_id
         if pretrained is not None:
             model = AutoModel.from_pretrained(
                 pretrained,
@@ -50,29 +54,39 @@ class ChatGLMRM(Module):
         if lora_path is not None and os.path.exists(os.path.join(lora_path,'value_head.bin')):
             print('load value_head from ',os.path.exists(os.path.join(lora_path,'value_head.bin')))
             value_head.load_state_dict(torch.load(os.path.join(lora_path,'value_head.bin')))
+            print('enable value_head grad')
         else:
             value_head.weight.data.normal_(mean=0.0, std=1 / (model.config.hidden_size + 1))
+        value_head = value_head.half().cpu()
         self.value_head = value_head
 
     def train(self, mode: bool = True):
         self.model.train(mode=mode)
         self.value_head.train(mode=mode)
     
-
-    def print_trainable_params(self):
+    def mark_only_lora_trainable(self, bias: str = "none"):
+        #since loading lora through peft will not mark sub-modules trainable, if you need to train from last checkpoint, you need to call this function
+        self.model.requires_grad_(True)
+        self.value_head.requires_grad_(True)
+        from peft.tuners.lora import mark_only_lora_as_trainable
+        mark_only_lora_as_trainable(self.model, bias)
+    def print_trainable_parameters(self):
         self.model.print_trainable_parameters()
 
     def forward(self, sequences: torch.LongTensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         #ChatGLM attention_mask is a [seq,seq] torch.bool matrix, it's not compatiable with other models' attention_mask
         #Since the model can generate the attention_mask by itself with special ending token, we can just pass the attention_mask as None
-        outputs = self.model(sequences, attention_mask=None,return_dict=True, output_hidden_states=True)
-        last_hidden_states = outputs['hidden_states'][-1]
-        # print(last_hidden_states.shape)
-        values = self.value_head(last_hidden_states)[:-1, :]
-        # print(values.shape)
-        values = values.transpose(0,1)#change from (seq,B) to (B,seq)
-        value = values.mean(dim=1).squeeze(1)    # ensure shape is (B)
-        # print(value.shape)
+        bs = sequences.shape[0]
+        seq = sequences.shape[1]
+        prompt_mask = (sequences != self.pad_id).to(torch.float)
+        if attention_mask is not None and (attention_mask.dtype != torch.bool or len(attention_mask.shape) != 4 or attention_mask.shape != (bs,1,seq,seq)):
+            attention_mask = None
+        outputs = self.model(sequences, attention_mask=attention_mask,return_dict=True, output_hidden_states=True)
+        last_hidden_states = outputs['hidden_states'][-1].transpose(0,1)#change from (seq,b,dim) to (b,seq,dim)
+        values = self.value_head(last_hidden_states).squeeze(2)[:,:-1]  # remove last token and squeeze the last dimension
+        prompt_mask = prompt_mask[:, :-1]
+        #calculate the mean of the values with the indexes only when the sequence[batch_id][index] != pad_id
+        value = masked_mean(values, prompt_mask, dim=1)
         return value
     
     def get_base_model(self):

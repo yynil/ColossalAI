@@ -139,7 +139,7 @@ class RewardModelTrainer(ABC):
                 self.strategy.optimizer_step(self.optimizer)
                 self.optimizer.zero_grad()
                 cnt += 1
-                if cnt == 100:
+                if cnt == 1000:
                     self.scheduler.step()
                     dist, acc = self.eval_acc(self.valid_dataloader)
                     cnt = 0
@@ -206,6 +206,8 @@ def train(args):
             model = RoBERTaRM(pretrained=args.pretrain, lora_rank=args.lora_rank).to(torch.cuda.current_device())
         elif args.model == 'chatglm':
             model = ChatGLMRM(pretrained=args.pretrain, lora_rank=args.lora_rank,lora_path=args.model_path).to(torch.cuda.current_device())
+            model.mark_only_lora_trainable()
+            model.print_trainable_params()
         else:
             raise ValueError(f'Unsupported model "{args.model}"')
 
@@ -219,26 +221,6 @@ def train(args):
         #     model.load_state_dict(state_dict, strict=True)
         #     del state_dict
         #     model.to(torch.cuda.current_device())
-    print(model)
-    def print_trainable_parameters(model):
-        """
-        Prints the number of trainable parameters in the model.
-        """
-        trainable_params = 0
-        all_param = 0
-        for _, param in model.named_parameters():
-            num_params = param.numel()
-            # if using DS Zero 3 and the weights are initialized empty
-            if num_params == 0 and hasattr(param, "ds_numel"):
-                num_params = param.ds_numel
-
-            all_param += num_params
-            if param.requires_grad:
-                trainable_params += num_params
-        print(
-            f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
-        )
-    print_trainable_parameters(model)
     print(f'current cuda memory is {torch.cuda.memory_allocated()/1024/1024} MB')
     # configure tokenizer
     if args.model == 'gpt2':
@@ -277,7 +259,13 @@ def train(args):
         loss_fn = LogExpLoss()
     else:
         raise ValueError(f'Unsupported loss function "{args.loss_fn}"')
-
+    
+    def random_print_dataset(dataset,num=2,description="dataset"):
+        import random
+        print(f'random print {description} dataset')
+        for i in range(num):
+            print(dataset[random.randint(0,len(dataset))]['chosen_input_ids'])
+            print(dataset[random.randint(0,len(dataset))]['reject_input_ids'])
     # configure dataset
     if args.train_file is not None:
         #if the train_file is a file , we use the EasyRewardDataset
@@ -287,12 +275,14 @@ def train(args):
         elif os.path.isdir(args.train_file):
             train_dataset = datasets.load_from_disk(args.train_file)
         print(f'train dataset {train_dataset}')
+        random_print_dataset(train_dataset,description="train")
     if args.valid_file is not None:
         if os.path.isfile(args.valid_file):
             valid_dataset = EasyRewardDataset(args.valid_file, tokenizer,max_length= max_len)
         elif os.path.isdir(args.valid_file):
             valid_dataset = datasets.load_from_disk(args.valid_file)
         print(f'valid dataset {valid_dataset}')
+        random_print_dataset(valid_dataset,description="valid")
     else:
         valid_dataset = None
     if args.eval_file is not None:
@@ -301,8 +291,11 @@ def train(args):
         elif os.path.isdir(args.eval_file): 
             eval_dataset = datasets.load_from_disk(args.eval_file)
         print(f'eval dataset {eval_dataset}')
+        random_print_dataset(eval_dataset,description="eval")
     else:
         eval_dataset = None
+
+    
     
     print(f'current cuda memory is {torch.cuda.memory_allocated()/1024/1024} MB')
     trainer = RewardModelTrainer(model=model,

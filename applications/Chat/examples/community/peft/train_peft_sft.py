@@ -13,8 +13,8 @@ from coati.models.opt import OPTLM
 from coati.trainer import SFTTrainer
 from coati.trainer.strategies import ColossalAIStrategy, DDPStrategy, NaiveStrategy
 from coati.utils import prepare_llama_tokenizer_and_embedding
+import datasets
 from datasets import load_dataset
-from easy_dataset import EasyDataset
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from torch.optim import Adam
 from torch.utils.data import DataLoader
@@ -22,11 +22,12 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoModelForCausalLM, AutoTokenizer, BloomTokenizerFast
 from transformers.models.gpt2.tokenization_gpt2 import GPT2Tokenizer
+from coati.models.glm import ChatGLMLM
 
 from colossalai.logging import get_dist_logger
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.tensor import ColoParameter
-
+from easy_dataset import EasySFTDataset
 
 def train(args):
     # configure strategy
@@ -43,23 +44,27 @@ def train(args):
 
     # configure model
     with strategy.model_init_context():
-        print('Warning: currently only bloom is tested, gpt2,llama and opt are not tested')
-        model = AutoModelForCausalLM.from_pretrained(args.pretrain).to(torch.cuda.current_device())
-        #if the args.save_path exists and args.save_path+'/adapter_config.json' exists, we'll load the adapter_config.json
-        if os.path.exists(args.save_path) and os.path.exists(args.save_path+'/adapter_config.json') \
-            and os.path.exists(args.save_path+'/adapter_model.bin'):
-            print("loading from saved peft model ", args.save_path)
-            model = PeftModel.from_pretrained(model, args.save_path)
-        else:
-            #we'll use peft lora library to do the lora
-            lora_rank = args.lora_rank if args.lora_rank > 0 else 32
-            #config lora with rank of lora_rank
-            lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
-                                     inference_mode=False,
-                                     r=lora_rank,
-                                     lora_alpha=32,
-                                     lora_dropout=0.1)
-            model = get_peft_model(model, lora_config)
+        print('Warning: currently only bloom/chatglm is tested, gpt2,llama and opt are not tested')
+        if args.model == 'bloom':
+            model = AutoModelForCausalLM.from_pretrained(args.pretrain).to(torch.cuda.current_device())
+            #if the args.save_path exists and args.save_path+'/adapter_config.json' exists, we'll load the adapter_config.json
+            if args.model_path is not None and os.path.exists(args.model_path) and os.path.exists(args.model_path+'/adapter_config.json') \
+                and os.path.exists(args.model_path+'/adapter_model.bin'):
+                print("loading from saved peft model ", args.model_path)
+                model = PeftModel.from_pretrained(model, args.model_path)
+            else:
+                #we'll use peft lora library to do the lora
+                lora_rank = args.lora_rank if args.lora_rank > 0 else 32
+                #config lora with rank of lora_rank
+                lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM,
+                                        inference_mode=False,
+                                        r=lora_rank,
+                                        lora_alpha=32,
+                                        lora_dropout=0.1)
+                model = get_peft_model(model, lora_config)
+        elif args.model == 'chatglm':
+            model = ChatGLMLM(pretrained=args.pretrain,lora_path=args.model_path).to(torch.cuda.current_device())
+            model.mark_only_lora_trainable()
         model.print_trainable_parameters()
 
     # configure tokenizer
@@ -78,6 +83,8 @@ def train(args):
             use_fast=False,
         )
         tokenizer.eos_token = '<\s>'
+    elif args.model == 'chatglm':
+        tokenizer = AutoTokenizer.from_pretrained(args.pretrain, trust_remote_code=True)
     else:
         raise ValueError(f'Unsupported model "{args.model}"')
     tokenizer.pad_token = tokenizer.eos_token
@@ -106,13 +113,12 @@ def train(args):
     logger.set_level('WARNING')
 
     # configure dataset
-    law_dataset = EasyDataset(args.dataset, tokenizer=tokenizer, is_group_texts=not args.is_short_text)
-    train_dataset = law_dataset
+    train_dataset = datasets.load_from_disk(args.dataset)
     print(train_dataset)
     eval_dataset = None
     if args.eval_dataset is not None:
-        eval_dataset = EasyDataset(args.eval_dataset, tokenizer=tokenizer, is_group_texts=not args.is_short_text)
-    data_collator = default_collate
+        eval_dataset = datasets.load_from_disk(args.dataset)
+    data_collator = EasySFTDataset.collate_fn
     if dist.is_initialized() and dist.get_world_size() > 1:
         train_sampler = DistributedSampler(train_dataset,
                                            shuffle=True,
@@ -172,10 +178,11 @@ if __name__ == '__main__':
     parser.add_argument('--strategy',
                         choices=['naive', 'ddp', 'colossalai_gemini', 'colossalai_zero2'],
                         default='naive')
-    parser.add_argument('--model', choices=['gpt2', 'bloom', 'opt', 'llama'], default='bloom')
+    parser.add_argument('--model', choices=['gpt2', 'bloom', 'opt', 'llama','chatglm'], default='bloom')
     parser.add_argument('--pretrain', type=str, default=None)
     parser.add_argument('--dataset', type=str, default=None)
     parser.add_argument('--eval_dataset', type=str, default=None)
+    parser.add_argument('--model_path', type=str, default=None)
     parser.add_argument('--save_path', type=str, default='output')
     parser.add_argument('--need_optim_ckpt', type=bool, default=False)
     parser.add_argument('--max_epochs', type=int, default=3)

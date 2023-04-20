@@ -15,4 +15,4 @@ torchrun --standalone --nproc_per_node=1 \
                              --batch_size 1 \
                              --lora_rank 32 \
                              --max_len 256 \
-                             --max_epochs 2 
+                             --max_epochs 1
